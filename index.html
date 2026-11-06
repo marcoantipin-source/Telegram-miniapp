@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Через пропасть</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1d1b3a;
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #over { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center;
+    justify-content: center; background: rgba(20, 16, 44, .78); color: #fff; text-align: center; }
+  #over h1 { margin: 0; font-size: 26px; font-weight: 600; }
+  #over .score { font-size: 88px; font-weight: 800; line-height: 1.1; margin: 6px 0 2px; }
+  #over p { margin: 0 0 28px; font-size: 17px; opacity: .8; }
+  #over button { font-size: 20px; font-weight: 700; padding: 15px 40px; border: 0; border-radius: 16px;
+    background: #5ee6c8; color: #0d2b25; }
+  #over button:active { transform: scale(.97); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="over">
+  <h1>Не долетел</h1>
+  <div class="score" id="finalScore">0</div>
+  <p id="bestText"></p>
+  <button id="again">Играть снова</button>
+</div>
+
+<script>
+// ---------- Telegram ----------
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) {
+  try {
+    tg.ready();
+    tg.expand();
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+    if (tg.setHeaderColor) tg.setHeaderColor('#1d1b3a');
+    if (tg.setBackgroundColor) tg.setBackgroundColor('#1d1b3a');
+  } catch (e) {}
+}
+const impact = (t) => { try { tg.HapticFeedback.impactOccurred(t); } catch (e) {} };
+const notify = (t) => { try { tg.HapticFeedback.notificationOccurred(t); } catch (e) {} };
+
+// ---------- Настройки (можно менять) ----------
+const GRAVITY    = 1800;  // сила тяжести
+const MAX_CHARGE = 0.9;   // за сколько секунд зарядка достигает максимума
+const JUMP_UP_MIN = 520, JUMP_UP_MAX = 680;   // высота прыжка (мин / макс)
+const JUMP_FWD_MIN = 90, JUMP_FWD_MAX = 420;  // скорость вперёд (мин / макс)
+const PW = 26, PH = 34;   // размер персонажа
+const H = 640, GY = 430;  // высота игрового мира и уровень земли
+
+// ---------- Canvas ----------
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W = 360, scale = 1, dpr = 1;
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  cv.width = innerWidth * dpr;
+  cv.height = innerHeight * dpr;
+  scale = innerHeight / H;
+  W = innerWidth / scale;
+}
+addEventListener('resize', resize);
+resize();
+
+// ---------- Состояние ----------
+let plats, p, camX, score, state, charging, chargeT, nextId;
+let best = 0;
+try { best = +localStorage.getItem('best') || 0; } catch (e) {}
+
+function reset() {
+  plats = [{ id: 0, x: -300, w: 520 }];
+  nextId = 1;
+  score = 0;
+  p = { x: 20, y: GY - PH, vx: 0, vy: 0, ground: true, cur: 0 };
+  camX = -60;
+  charging = false;
+  chargeT = 0;
+  state = 'play';
+  document.getElementById('over').style.display = 'none';
+  fillPlatforms();
+}
+
+function fillPlatforms() {
+  const d = Math.min(score, 40) / 40; // сложность 0..1
+  while (true) {
+    const last = plats[plats.length - 1];
+    if (last.x + last.w > camX + W + 300) break;
+    const gap = 50 + Math.random() * (60 + 120 * d);       // ширина пропасти
+    const w = 130 - 60 * d + Math.random() * 50;           // ширина площадки
+    plats.push({ id: nextId++, x: last.x + last.w + gap, w: w });
+  }
+  while (plats.length > 3 && plats[1].x + plats[1].w < camX - 60) plats.shift();
+}
+
+function gameOver() {
+  if (state !== 'play') return;
+  state = 'over';
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('best', best); } catch (e) {}
+  }
+  document.getElementById('finalScore').textContent = score;
+  document.getElementById('bestText').textContent = 'Рекорд: ' + best;
+  document.getElementById('over').style.display = 'flex';
+  notify('error');
+}
+
+// ---------- Управление ----------
+function press() {
+  if (state === 'play') { charging = true; if (p.ground) chargeT = 0; }
+}
+function release() {
+  const was = charging;
+  charging = false;
+  if (!was || state !== 'play' || !p.ground) { chargeT = 0; return; }
+  const k = Math.min(chargeT / MAX_CHARGE, 1);
+  p.vy = -(JUMP_UP_MIN + (JUMP_UP_MAX - JUMP_UP_MIN) * k);
+  p.vx = JUMP_FWD_MIN + (JUMP_FWD_MAX - JUMP_FWD_MIN) * k;
+  p.ground = false;
+  chargeT = 0;
+  impact('light');
+}
+cv.addEventListener('pointerdown', (e) => { e.preventDefault(); press(); });
+addEventListener('pointerup', release);
+addEventListener('pointercancel', release);
+addEventListener('keydown', (e) => {
+  if ((e.code === 'Space' || e.code === 'ArrowUp') && !e.repeat) { e.preventDefault(); press(); }
+});
+addEventListener('keyup', (e) => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') release();
+});
+document.getElementById('again').addEventListener('click', reset);
+
+// ---------- Логика ----------
+function update(dt) {
+  if (state === 'play') {
+    if (charging && p.ground) chargeT = Math.min(chargeT + dt, MAX_CHARGE);
+
+    if (!p.ground) {
+      const prevBottom = p.y + PH;
+      p.vy += GRAVITY * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      const bottom = p.y + PH;
+
+      // приземление: пересекли линию земли сверху вниз
+      if (p.vy > 0 && prevBottom <= GY && bottom >= GY) {
+        const cx = p.x + PW / 2;
+        const pl = plats.find((q) => cx >= q.x - 4 && cx <= q.x + q.w + 4);
+        if (pl) {
+          p.y = GY - PH; p.vx = 0; p.vy = 0; p.ground = true;
+          if (pl.id > p.cur) { score += pl.id - p.cur; p.cur = pl.id; }
+          impact('soft');
+        }
+      }
+      // промахнулись: упираемся в стенку площадки, дальше — падение
+      if (p.y + PH > GY + 2) {
+        for (const q of plats) {
+          if (p.x + PW > q.x && p.x + PW - q.x < 20 && p.x < q.x + q.w) { p.x = q.x - PW; p.vx = 0; }
+        }
+      }
+      if (p.y > H + 40) gameOver();
+    }
+  }
+  camX += (p.x - 80 - camX) * Math.min(1, dt * 5);
+  fillPlatforms();
+}
+
+// ---------- Отрисовка ----------
+function draw() {
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#1d1b3a');
+  sky.addColorStop(0.6, '#6b3f7a');
+  sky.addColorStop(1, '#f08a5d');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+
+  // дальние скалы (параллакс)
+  ctx.fillStyle = '#3a2a5c';
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  for (let x = 0; x <= W + 20; x += 20) {
+    const wx = x + camX * 0.25;
+    const y = 330 + Math.sin(wx * 0.012) * 40 + Math.sin(wx * 0.031) * 18;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(W + 20, H);
+  ctx.fill();
+
+  // площадки
+  for (const q of plats) {
+    const sx = q.x - camX;
+    if (sx > W || sx + q.w < 0) continue;
+    ctx.fillStyle = '#2a1d44';
+    ctx.fillRect(sx, GY, q.w, H - GY);
+    ctx.fillStyle = '#f2c46d';
+    ctx.fillRect(sx, GY, q.w, 8);
+  }
+
+  // персонаж (сплющивается при зарядке)
+  const k = charging && p.ground ? Math.min(chargeT / MAX_CHARGE, 1) : 0;
+  const h = PH * (1 - 0.35 * k);
+  const w = PW * (1 + 0.3 * k);
+  const px = p.x - camX - (w - PW) / 2;
+  const py = p.y + PH - h;
+  ctx.fillStyle = '#fff4dc';
+  ctx.beginPath();
+  ctx.roundRect(px, py, w, h, 7);
+  ctx.fill();
+  ctx.fillStyle = '#1d1b3a';
+  ctx.fillRect(px + w - 12, py + h * 0.25, 4, 6);
+  ctx.fillRect(px + w - 20, py + h * 0.25, 4, 6);
+
+  // шкала силы прыжка
+  if (k > 0) {
+    ctx.fillStyle = 'rgba(0,0,0,.35)';
+    ctx.fillRect(px - 8, py - 16, 42, 7);
+    ctx.fillStyle = k < 0.7 ? '#5ee6c8' : '#ffb347';
+    ctx.fillRect(px - 8, py - 16, 42 * k, 7);
+  }
+
+  // счёт
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.font = '800 56px system-ui, sans-serif';
+  ctx.fillText(score, W / 2, 80);
+  if (score === 0 && state === 'play') {
+    ctx.font = '600 18px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,.85)';
+    ctx.fillText('Зажми экран — чем дольше, тем дальше прыжок', W / 2, 120);
+  }
+}
+
+// ---------- Игровой цикл ----------
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min((now - last) / 1000, 0.033);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
